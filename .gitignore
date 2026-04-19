@@ -1,0 +1,11 @@
+# Entornos virtuales de Python
+venv/
+env/
+env-bridgets/
+
+# Archivos de caché de Python (no sirven en la nube)
+__pycache__/
+*.pyc
+
+# Archivos de entorno y secretos (¡CRÍTICO PARA TU SEGURIDAD!)
+.env
