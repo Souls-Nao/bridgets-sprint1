@@ -9,14 +9,15 @@ class ControladorUsuarios:
         self.seguridad = GestorSeguridad()
 
     def registrar_nuevo_usuario(self, datos: RegistroPeticion):
-        # 1. Verificar si el correo o el usuario ya existen
+        # Verificar si el correo ya existe
         if self.db.query(UsuarioDB).filter(UsuarioDB.correo_electronico == datos.correo_electronico).first():
             return False, "El correo ya está registrado."
         
+        # Verificar si el usuario ya existe
         if self.db.query(UsuarioDB).filter(UsuarioDB.usuario_login == datos.usuario_login).first():
-            return False, "El nombre de usuario ya está tomado."
+            return False, "El nombre de usuario ya está en uso."
 
-        # 2. Crear el nuevo usuario
+        # Crear el nuevo usuario
         nuevo_usuario = UsuarioDB(
             nombre_completo=datos.nombre_completo,
             codigo=datos.codigo,
@@ -30,7 +31,6 @@ class ControladorUsuarios:
         return True, "Registro exitoso."
 
     def autenticar_usuario(self, usuario_str: str, clave_plana: str):
-        # Ahora buscamos por nombre de usuario
         usuario = self.db.query(UsuarioDB).filter(UsuarioDB.usuario_login == usuario_str).first()
         
         if not usuario:
