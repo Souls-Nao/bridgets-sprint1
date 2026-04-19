@@ -25,8 +25,9 @@ def endpoint_registro(peticion: RegistroPeticion, db: Session = Depends(obtener_
 @app.post("/api/login")
 def endpoint_login(peticion: LoginPeticion, db: Session = Depends(obtener_sesion)):
     controlador = ControladorUsuarios(db)
-    exito, resultado = controlador.autenticar_usuario(peticion.correo_electronico, peticion.password)
+    # Pasamos usuario_login en lugar de correo
+    exito, resultado = controlador.autenticar_usuario(peticion.usuario_login, peticion.password)
     
     if not exito:
         raise HTTPException(status_code=401, detail=resultado)
-    return {"mensaje": "Inicio de sesión exitoso", "datos_sesion": resultado}
+    return {"mensaje": "Acceso concedido", "datos_sesion": resultado}
