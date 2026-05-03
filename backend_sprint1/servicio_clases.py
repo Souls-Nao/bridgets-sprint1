@@ -30,6 +30,7 @@ def _construir_resumen(clase: ClaseDB, inscritos: int, inscrito: bool) -> ClaseR
         tutor=TutorResumen(id=clase.tutor.id, nombre=clase.tutor.nombre_completo, usuario=clase.tutor.usuario_login),
         inscritos=inscritos,
         inscrito=inscrito,
+        es_privada=bool(clase.es_privada),
     )
 
 
@@ -45,6 +46,7 @@ class ControladorClases:
             materia=datos.materia.strip(),
             descripcion=(datos.descripcion or "").strip() or None,
             tutor_id=tutor.id,
+            es_privada=bool(datos.es_privada),
         )
         self.db.add(nueva)
         self.db.commit()
@@ -98,15 +100,24 @@ class ControladorClases:
     def buscar(self, consulta: str, usuario: UsuarioDB, limite: int = 30) -> List[ClaseResumen]:
         consulta_norm = (consulta or "").strip()
         q = self.db.query(ClaseDB).options(joinedload(ClaseDB.tutor))
-        if consulta_norm:
+
+        # Las clases privadas solo aparecen si el query coincide EXACTAMENTE con el código.
+        codigo_objetivo = consulta_norm.upper() if consulta_norm else None
+        if codigo_objetivo:
             patron = f"%{consulta_norm}%"
             q = q.filter(
                 or_(
-                    ClaseDB.nombre.ilike(patron),
-                    ClaseDB.materia.ilike(patron),
-                    ClaseDB.codigo_clase.ilike(patron),
+                    (ClaseDB.es_privada.is_(False)) & or_(
+                        ClaseDB.nombre.ilike(patron),
+                        ClaseDB.materia.ilike(patron),
+                        ClaseDB.codigo_clase.ilike(patron),
+                    ),
+                    ClaseDB.codigo_clase == codigo_objetivo,
                 )
             )
+        else:
+            q = q.filter(ClaseDB.es_privada.is_(False))
+
         clases = q.order_by(ClaseDB.creada_en.desc()).limit(limite).all()
         if not clases:
             return []
@@ -148,6 +159,16 @@ class ControladorClases:
         clase = self.obtener_clase(clase_id)
         if clase is None:
             return None
+        es_propietario_temprano = clase.tutor_id == usuario.id
+        if clase.es_privada and not es_propietario_temprano:
+            inscrito_anticipado = (
+                self.db.query(InscripcionDB)
+                .filter(InscripcionDB.clase_id == clase.id, InscripcionDB.estudiante_id == usuario.id)
+                .first()
+                is not None
+            )
+            if not inscrito_anticipado:
+                return None  # comportamiento "no existe" para clases privadas
         inscritos = (
             self.db.query(func.count(InscripcionDB.id))
             .filter(InscripcionDB.clase_id == clase.id)
@@ -174,6 +195,7 @@ class ControladorClases:
             tutor=TutorResumen(id=clase.tutor.id, nombre=clase.tutor.nombre_completo, usuario=clase.tutor.usuario_login),
             inscritos=inscritos,
             inscrito=inscrito or es_propietario,
+            es_privada=bool(clase.es_privada),
             descripcion=clase.descripcion,
             creada_en=clase.creada_en,
             es_propietario=es_propietario,

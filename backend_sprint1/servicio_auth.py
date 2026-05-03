@@ -1,5 +1,6 @@
 import os
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 import jwt
 from fastapi import Depends, HTTPException, status
@@ -61,3 +62,15 @@ def exigir_rol(rol_requerido: str):
         return usuario
 
     return validador
+
+
+def usuario_desde_token(token: str, db: Session) -> Optional[UsuarioDB]:
+    """Decodifica un JWT crudo y devuelve el usuario. Útil para WebSockets."""
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        id_usuario = payload.get("sub")
+        if id_usuario is None:
+            return None
+    except InvalidTokenError:
+        return None
+    return db.query(UsuarioDB).filter(UsuarioDB.id == int(id_usuario)).first()

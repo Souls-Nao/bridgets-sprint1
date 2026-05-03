@@ -1,11 +1,12 @@
 from sqlalchemy import (
+    Boolean,
     Column,
-    Integer,
-    String,
-    Text,
     DateTime,
     ForeignKey,
+    Integer,
     LargeBinary,
+    String,
+    Text,
     UniqueConstraint,
     func,
 )
@@ -39,6 +40,7 @@ class ClaseDB(Base):
     materia = Column(String(80), nullable=False, index=True)
     descripcion = Column(Text, nullable=True)
     tutor_id = Column(Integer, ForeignKey("cuentas_v2.id"), nullable=False)
+    es_privada = Column(Boolean, nullable=False, server_default="false", default=False)
     creada_en = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     tutor = relationship("UsuarioDB", back_populates="clases_dictadas")
@@ -46,6 +48,7 @@ class ClaseDB(Base):
     anuncios = relationship("AnuncioClaseDB", back_populates="clase", cascade="all, delete-orphan")
     archivos = relationship("ArchivoClaseDB", back_populates="clase", cascade="all, delete-orphan")
     notas = relationship("NotaEstudianteDB", back_populates="clase", cascade="all, delete-orphan")
+    salas_chat = relationship("SalaChatDB", back_populates="clase", cascade="all, delete-orphan")
 
 
 class InscripcionDB(Base):
@@ -111,3 +114,32 @@ class NotaEstudianteDB(Base):
 
     clase = relationship("ClaseDB", back_populates="notas")
     estudiante = relationship("UsuarioDB", back_populates="notas")
+
+
+class SalaChatDB(Base):
+    __tablename__ = "salas_chat"
+    __table_args__ = (UniqueConstraint("clase_id", "estudiante_id", name="uq_sala_clase_estudiante"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    clase_id = Column(Integer, ForeignKey("clases.id", ondelete="CASCADE"), nullable=False, index=True)
+    estudiante_id = Column(Integer, ForeignKey("cuentas_v2.id", ondelete="CASCADE"), nullable=False, index=True)
+    tutor_id = Column(Integer, ForeignKey("cuentas_v2.id", ondelete="CASCADE"), nullable=False, index=True)
+    iniciador_id = Column(Integer, ForeignKey("cuentas_v2.id"), nullable=False)
+    estado = Column(String(20), nullable=False, default="pendiente")  # pendiente | activa | cerrada
+    creada_en = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    actualizada_en = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    clase = relationship("ClaseDB", back_populates="salas_chat")
+    mensajes = relationship("MensajeChatDB", back_populates="sala", cascade="all, delete-orphan")
+
+
+class MensajeChatDB(Base):
+    __tablename__ = "mensajes_chat"
+
+    id = Column(Integer, primary_key=True, index=True)
+    sala_id = Column(Integer, ForeignKey("salas_chat.id", ondelete="CASCADE"), nullable=False, index=True)
+    autor_id = Column(Integer, ForeignKey("cuentas_v2.id"), nullable=False)
+    contenido = Column(Text, nullable=False)
+    enviado_en = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
+
+    sala = relationship("SalaChatDB", back_populates="mensajes")

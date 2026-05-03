@@ -35,6 +35,7 @@ class ClaseCrear(BaseModel):
     nombre: str = Field(..., min_length=3, max_length=80)
     materia: str = Field(..., min_length=2, max_length=80)
     descripcion: Optional[str] = Field(None, max_length=2000)
+    es_privada: bool = False
 
 
 class TutorResumen(BaseModel):
@@ -51,6 +52,7 @@ class ClaseResumen(BaseModel):
     tutor: TutorResumen
     inscritos: int
     inscrito: bool = False
+    es_privada: bool = False
 
 
 class ClaseDetalle(ClaseResumen):
@@ -113,3 +115,51 @@ class NotaResumen(BaseModel):
     actualizada_en: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+
+# ------------------------- Disponibilidad / registro -------------------------
+
+class DisponibilidadRespuesta(BaseModel):
+    disponible: bool
+    motivo: Optional[str] = None
+
+
+# ------------------------- Birdgt (chat) -------------------------
+
+class ContraparteResumen(BaseModel):
+    id: int
+    nombre: str
+    rol: str
+
+
+class SalaResumen(BaseModel):
+    id: int
+    clase_id: int
+    clase_nombre: str
+    estado: str
+    iniciador_id: int
+    contraparte: ContraparteResumen
+    creada_en: datetime
+    actualizada_en: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class MensajeResumen(BaseModel):
+    id: int
+    sala_id: int
+    autor_id: int
+    contenido: str
+    enviado_en: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class MensajeCrear(BaseModel):
+    contenido: str = Field(..., min_length=1, max_length=4000)
+
+
+class BirdgtIniciarRespuesta(BaseModel):
+    salas: list[SalaResumen]
+    creadas: int
+    reutilizadas: int
