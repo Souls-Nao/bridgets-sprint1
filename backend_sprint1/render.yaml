@@ -8,4 +8,10 @@ services:
     envVars:
       - key: DATABASE_URL
         sync: false
+      - key: SECRET_KEY
+        sync: false
+      - key: ACCESS_TOKEN_EXPIRE_HOURS
+        value: "12"
+      - key: MAX_UPLOAD_BYTES
+        value: "26214400"
     plan: free
