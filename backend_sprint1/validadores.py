@@ -20,6 +20,22 @@ class LoginPeticion(BaseModel):
     password: str
 
 
+class PerfilActualizar(BaseModel):
+    """PATCH parcial sobre el perfil. `usuario_login` no es editable."""
+    nombre_completo: Optional[str] = Field(None, min_length=3, max_length=50)
+    codigo: Optional[str] = Field(None, pattern=r"^\d+$", min_length=1, max_length=9)
+    correo_electronico: Optional[EmailStr] = None
+
+
+class CambiarPasswordPeticion(BaseModel):
+    password_actual: str = Field(..., min_length=1)
+    password_nueva: str = Field(..., min_length=6)
+
+
+class EliminarCuentaPeticion(BaseModel):
+    password: str = Field(..., min_length=1)
+
+
 class SesionRespuesta(BaseModel):
     token: str
     tipo_token: str = "Bearer"
@@ -38,10 +54,26 @@ class ClaseCrear(BaseModel):
     es_privada: bool = False
 
 
+class ClaseActualizar(BaseModel):
+    """Campos editables de una clase. Todos opcionales para PATCH parcial."""
+    nombre: Optional[str] = Field(None, min_length=3, max_length=80)
+    materia: Optional[str] = Field(None, min_length=2, max_length=80)
+    descripcion: Optional[str] = Field(None, max_length=2000)
+    es_privada: Optional[bool] = None
+
+
 class TutorResumen(BaseModel):
     id: int
     nombre: str
     usuario: str
+
+
+class EstudianteResumen(BaseModel):
+    id: int
+    nombre: str
+    usuario: str
+    correo: str
+    inscrito_en: datetime
 
 
 class ClaseResumen(BaseModel):
@@ -72,12 +104,35 @@ class AnuncioCrear(BaseModel):
     contenido: str = Field(..., min_length=1, max_length=4000)
 
 
+class AnuncioActualizar(BaseModel):
+    """PATCH parcial: cualquier campo omitido se deja como está."""
+    titulo: Optional[str] = Field(None, min_length=3, max_length=120)
+    contenido: Optional[str] = Field(None, min_length=1, max_length=4000)
+    anclado: Optional[bool] = None
+
+
 class AnuncioResumen(BaseModel):
     id: int
     titulo: str
     contenido: str
     publicado_en: datetime
     autor_nombre: str
+    anclado: bool = False
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ComentarioCrear(BaseModel):
+    contenido: str = Field(..., min_length=1, max_length=2000)
+
+
+class ComentarioResumen(BaseModel):
+    id: int
+    anuncio_id: int
+    autor_id: int
+    autor_nombre: str
+    contenido: str
+    publicado_en: datetime
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -91,8 +146,14 @@ class ArchivoResumen(BaseModel):
     tamano_bytes: int
     subido_en: datetime
     autor_nombre: str
+    categoria: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class ArchivoActualizar(BaseModel):
+    """Por ahora solo la categoría es editable; nombre/contenido requerirían versionado."""
+    categoria: Optional[str] = Field(None, max_length=40)
 
 
 # ------------------------- Notas -------------------------
@@ -141,6 +202,7 @@ class SalaResumen(BaseModel):
     contraparte: ContraparteResumen
     creada_en: datetime
     actualizada_en: datetime
+    mensajes_no_leidos: int = 0
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -151,12 +213,96 @@ class MensajeResumen(BaseModel):
     autor_id: int
     contenido: str
     enviado_en: datetime
+    editado_en: Optional[datetime] = None
 
     model_config = ConfigDict(from_attributes=True)
 
 
 class MensajeCrear(BaseModel):
     contenido: str = Field(..., min_length=1, max_length=4000)
+
+
+class MensajeActualizar(BaseModel):
+    contenido: str = Field(..., min_length=1, max_length=4000)
+
+
+class NoLeidosClase(BaseModel):
+    """Total de mensajes no leídos del usuario en todas sus salas de una clase."""
+    total: int
+
+
+# ------------------------- Tareas y entregas -------------------------
+
+class TareaCrear(BaseModel):
+    titulo: str = Field(..., min_length=3, max_length=120)
+    descripcion: Optional[str] = Field(None, max_length=4000)
+    fecha_limite: Optional[datetime] = None
+    max_puntos: float = Field(10.0, ge=0.1, le=100.0)
+
+
+class TareaActualizar(BaseModel):
+    titulo: Optional[str] = Field(None, min_length=3, max_length=120)
+    descripcion: Optional[str] = Field(None, max_length=4000)
+    fecha_limite: Optional[datetime] = None
+    max_puntos: Optional[float] = Field(None, ge=0.1, le=100.0)
+
+
+class EntregaResumen(BaseModel):
+    """Datos de la entrega (visible para el dueño-estudiante y el tutor)."""
+    id: int
+    tarea_id: int
+    estudiante_id: int
+    estudiante_nombre: str
+    contenido: str
+    entregada_en: datetime
+    actualizada_en: datetime
+    calificacion: Optional[float] = None
+    feedback: Optional[str] = None
+    calificada_en: Optional[datetime] = None
+
+
+class TareaResumen(BaseModel):
+    id: int
+    clase_id: int
+    titulo: str
+    descripcion: Optional[str] = None
+    fecha_limite: Optional[datetime] = None
+    max_puntos: float
+    creada_en: datetime
+    autor_nombre: str
+    # Información de contexto según quién consulta:
+    # - Estudiante: su propia entrega (None si no entregó).
+    # - Tutor: total de entregas recibidas.
+    entrega_propia: Optional[EntregaResumen] = None
+    total_entregas: Optional[int] = None
+
+
+class EntregaCrear(BaseModel):
+    contenido: str = Field(..., min_length=1, max_length=10000)
+
+
+class CalificarPeticion(BaseModel):
+    calificacion: float = Field(..., ge=0.0)
+    feedback: Optional[str] = Field(None, max_length=4000)
+
+
+# ------------------------- Notificaciones -------------------------
+
+class NotificacionResumen(BaseModel):
+    id: int
+    tipo: str
+    titulo: str
+    cuerpo: Optional[str] = None
+    enlace_tipo: Optional[str] = None
+    enlace_id: Optional[int] = None
+    creada_en: datetime
+    leida_en: Optional[datetime] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class TotalNoLeidas(BaseModel):
+    total: int
 
 
 class BirdgtIniciarRespuesta(BaseModel):

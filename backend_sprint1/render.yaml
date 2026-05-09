@@ -5,13 +5,27 @@ services:
     rootDir: .
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn app_server:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /healthz
+    plan: free
     envVars:
+      # --- Secretos: se pegan en el dashboard, sync:false los excluye del repo ---
       - key: DATABASE_URL
         sync: false
       - key: SECRET_KEY
         sync: false
+      - key: BRIDGETS_ADMIN_TOKEN
+        sync: false
+
+      # --- Configuración no sensible (commiteable) ---
       - key: ACCESS_TOKEN_EXPIRE_HOURS
         value: "12"
       - key: MAX_UPLOAD_BYTES
-        value: "26214400"
-    plan: free
+        value: "26214400"        # 25 MB para subida de archivos
+      - key: MAX_REQUEST_BYTES
+        value: "31457280"        # 30 MB para body total (multipart overhead incluido)
+      - key: LOG_LEVEL
+        value: "INFO"
+
+      # --- CORS (opcional: descomenta si añades cliente web en el futuro) ---
+      # - key: BRIDGETS_CORS_ORIGINS
+      #   value: "https://tu-dominio-cliente.com"

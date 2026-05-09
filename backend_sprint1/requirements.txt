@@ -8,3 +8,8 @@ python-dotenv
 pyjwt
 python-multipart
 websockets
+
+# Tests (no se requieren en producción; pip install -r requirements.txt los instala
+# para CI/local. En Render, el comando de start sigue siendo solo uvicorn).
+pytest
+httpx

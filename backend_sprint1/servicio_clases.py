@@ -6,7 +6,14 @@ from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, joinedload
 
 from entidades import ClaseDB, InscripcionDB, UsuarioDB
-from validadores import ClaseCrear, ClaseDetalle, ClaseResumen, TutorResumen
+from validadores import (
+    ClaseActualizar,
+    ClaseCrear,
+    ClaseDetalle,
+    ClaseResumen,
+    EstudianteResumen,
+    TutorResumen,
+)
 
 
 _ALFABETO_CODIGO = string.ascii_uppercase + string.digits
@@ -72,29 +79,7 @@ class ControladorClases:
                 .order_by(InscripcionDB.inscrito_en.desc())
                 .all()
             )
-
-        if not clases:
-            return []
-
-        ids = [c.id for c in clases]
-        conteos = dict(
-            self.db.query(InscripcionDB.clase_id, func.count(InscripcionDB.id))
-            .filter(InscripcionDB.clase_id.in_(ids))
-            .group_by(InscripcionDB.clase_id)
-            .all()
-        )
-        inscripciones_propias = set()
-        if usuario.tipo_cuenta == "estudiante":
-            inscripciones_propias = {
-                fila.clase_id
-                for fila in self.db.query(InscripcionDB.clase_id)
-                .filter(InscripcionDB.estudiante_id == usuario.id, InscripcionDB.clase_id.in_(ids))
-                .all()
-            }
-        return [
-            _construir_resumen(c, conteos.get(c.id, 0), c.id in inscripciones_propias or usuario.tipo_cuenta == "tutor")
-            for c in clases
-        ]
+        return self._armar_resumenes(clases, usuario)
 
     # ---------- Búsqueda pública ----------
     def buscar(self, consulta: str, usuario: UsuarioDB, limite: int = 30) -> List[ClaseResumen]:
@@ -102,9 +87,9 @@ class ControladorClases:
         q = self.db.query(ClaseDB).options(joinedload(ClaseDB.tutor))
 
         # Las clases privadas solo aparecen si el query coincide EXACTAMENTE con el código.
-        codigo_objetivo = consulta_norm.upper() if consulta_norm else None
-        if codigo_objetivo:
+        if consulta_norm:
             patron = f"%{consulta_norm}%"
+            codigo_objetivo = consulta_norm.upper()
             q = q.filter(
                 or_(
                     (ClaseDB.es_privada.is_(False)) & or_(
@@ -119,9 +104,17 @@ class ControladorClases:
             q = q.filter(ClaseDB.es_privada.is_(False))
 
         clases = q.order_by(ClaseDB.creada_en.desc()).limit(limite).all()
+        return self._armar_resumenes(clases, usuario)
+
+    def _armar_resumenes(self, clases: List[ClaseDB], usuario: UsuarioDB) -> List[ClaseResumen]:
+        """
+        Construye los ClaseResumen para una lista de clases ya cargadas, resolviendo
+        en lote los conteos de inscritos y, si el usuario es estudiante, sus
+        propias inscripciones. Un tutor se considera "inscrito" en una clase si
+        es el dueño (tutor_id == usuario.id).
+        """
         if not clases:
             return []
-
         ids = [c.id for c in clases]
         conteos = dict(
             self.db.query(InscripcionDB.clase_id, func.count(InscripcionDB.id))
@@ -129,7 +122,7 @@ class ControladorClases:
             .group_by(InscripcionDB.clase_id)
             .all()
         )
-        inscripciones_propias = set()
+        inscripciones_propias: set[int] = set()
         if usuario.tipo_cuenta == "estudiante":
             inscripciones_propias = {
                 fila.clase_id
@@ -141,7 +134,7 @@ class ControladorClases:
             _construir_resumen(
                 c,
                 conteos.get(c.id, 0),
-                c.id in inscripciones_propias or (usuario.tipo_cuenta == "tutor" and c.tutor_id == usuario.id),
+                c.id in inscripciones_propias or c.tutor_id == usuario.id,
             )
             for c in clases
         ]
@@ -200,6 +193,84 @@ class ControladorClases:
             creada_en=clase.creada_en,
             es_propietario=es_propietario,
         )
+
+    # ---------- Edición / borrado ----------
+    def actualizar(
+        self,
+        clase: ClaseDB,
+        datos: ClaseActualizar,
+        usuario_para_detalle: UsuarioDB,
+    ) -> Optional[ClaseDetalle]:
+        """
+        PATCH parcial sobre la clase. Solo se modifican los campos enviados
+        explícitamente. `codigo_clase` y `tutor_id` no son editables para no
+        romper inscripciones existentes ni cambiar de dueño por accidente.
+        """
+        cambios = datos.model_dump(exclude_unset=True)
+        if "nombre" in cambios and cambios["nombre"] is not None:
+            clase.nombre = cambios["nombre"].strip()
+        if "materia" in cambios and cambios["materia"] is not None:
+            clase.materia = cambios["materia"].strip()
+        if "descripcion" in cambios:
+            valor = (cambios["descripcion"] or "").strip()
+            clase.descripcion = valor or None
+        if "es_privada" in cambios and cambios["es_privada"] is not None:
+            clase.es_privada = bool(cambios["es_privada"])
+        self.db.commit()
+        self.db.refresh(clase)
+        return self.detalle_para_usuario(clase.id, usuario_para_detalle)
+
+    def eliminar(self, clase: ClaseDB) -> None:
+        # cascade='all, delete-orphan' + ondelete='CASCADE' en inscripciones,
+        # anuncios, archivos (con sus blobs), notas y salas_chat hacen que
+        # toda la dependencia se borre al eliminar la clase.
+        self.db.delete(clase)
+        self.db.commit()
+
+    # ---------- Membresía ----------
+    def listar_estudiantes(self, clase: ClaseDB) -> List[EstudianteResumen]:
+        filas = (
+            self.db.query(InscripcionDB, UsuarioDB)
+            .join(UsuarioDB, UsuarioDB.id == InscripcionDB.estudiante_id)
+            .filter(InscripcionDB.clase_id == clase.id)
+            .order_by(UsuarioDB.nombre_completo.asc())
+            .all()
+        )
+        return [
+            EstudianteResumen(
+                id=u.id,
+                nombre=u.nombre_completo,
+                usuario=u.usuario_login,
+                correo=u.correo_electronico,
+                inscrito_en=insc.inscrito_en,
+            )
+            for insc, u in filas
+        ]
+
+    def listar_estudiantes_ids(self, clase_id: int) -> List[int]:
+        """Solo los ids de los estudiantes inscritos. Útil para notificaciones masivas."""
+        return [
+            r.estudiante_id
+            for r in self.db.query(InscripcionDB.estudiante_id)
+            .filter(InscripcionDB.clase_id == clase_id)
+            .all()
+        ]
+
+    def desinscribir(self, clase: ClaseDB, estudiante: UsuarioDB) -> bool:
+        """Borra la inscripción del estudiante en la clase. Devuelve False si no existía."""
+        inscripcion = (
+            self.db.query(InscripcionDB)
+            .filter(
+                InscripcionDB.clase_id == clase.id,
+                InscripcionDB.estudiante_id == estudiante.id,
+            )
+            .first()
+        )
+        if inscripcion is None:
+            return False
+        self.db.delete(inscripcion)
+        self.db.commit()
+        return True
 
     # ---------- Inscripción ----------
     def inscribir_estudiante(
