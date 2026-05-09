@@ -554,7 +554,7 @@ def endpoint_actualizar_clase(
 
 
 @app.delete("/api/clases/{clase_id}", status_code=status.HTTP_204_NO_CONTENT)
-def endpoint_eliminar_clase(
+async def endpoint_eliminar_clase(
     request: Request,
     clase_id: int = Path(..., ge=1),
     tutor: UsuarioDB = Depends(exigir_rol("tutor")),
@@ -562,11 +562,22 @@ def endpoint_eliminar_clase(
 ):
     clase = _exigir_tutor_propietario(db, clase_id, tutor)
     nombre = clase.nombre
-    ControladorClases(db).eliminar(clase)
+    # Tomamos los ids de inscritos ANTES de borrar (la cascada los borra junto
+    # con la clase y los necesitamos para notificarles).
+    ctrl = ControladorClases(db)
+    inscritos = ctrl.listar_estudiantes_ids(clase_id)
+    ctrl.eliminar(clase)
     auditar(
         db, "clase_eliminada", actor_id=tutor.id,
         recurso_tipo="clase", recurso_id=clase_id,
         ip=_ip_de(request), detalles=nombre,
+    )
+    # Aviso por WS a los inscritos para que su cliente limpie la UI sin
+    # esperar a un refresh manual. El propio tutor también recibe el evento
+    # (útil si tenía la app abierta en otra sesión).
+    await gestor_conexiones.enviar_a_varios(
+        list(set(inscritos + [tutor.id])),
+        {"tipo": "clase_eliminada", "clase_id": clase_id, "nombre": nombre},
     )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
