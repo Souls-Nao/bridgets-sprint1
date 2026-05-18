@@ -338,3 +338,28 @@ class VideoSesionResumen(BaseModel):
 class VideoConfigRespuesta(BaseModel):
     """Configuración WebRTC que el cliente usa para crear su `RTCPeerConnection`."""
     ice_servers: list[dict]
+
+
+# ------------------------- Llamadas grupales -------------------------
+
+class LlamadaGrupalCrear(BaseModel):
+    titulo: Optional[str] = Field(None, max_length=120)
+
+
+class ParticipanteLlamadaResumen(BaseModel):
+    usuario_id: int
+    nombre: str
+    es_iniciador: bool = False
+    unido_en: datetime
+
+
+class LlamadaGrupalResumen(BaseModel):
+    id: int
+    clase_id: int
+    iniciador_id: int
+    iniciador_nombre: str
+    titulo: Optional[str] = None
+    estado: str
+    creada_en: datetime
+    finalizada_en: Optional[datetime] = None
+    participantes: list[ParticipanteLlamadaResumen] = []

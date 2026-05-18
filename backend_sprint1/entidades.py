@@ -321,6 +321,71 @@ class SesionVideoDB(Base):
     sala = relationship("SalaChatDB")
 
 
+class LlamadaGrupalDB(Base):
+    """
+    Llamada grupal "modo aula" iniciada por un tutor en una clase. A diferencia
+    de `SesionVideoDB` (1-a-1 anidada en sala), esta vive en la clase y
+    cualquier miembro de la clase puede unirse mientras esté `activa`.
+
+    Topología WebRTC: mesh — cada cliente abre una `RTCPeerConnection` con
+    cada otro participante. Práctico hasta ~6 participantes; para más se
+    necesitaría un SFU, que queda fuera de alcance.
+    """
+    __tablename__ = "llamadas_grupales"
+
+    id = Column(Integer, primary_key=True, index=True)
+    clase_id = Column(
+        Integer,
+        ForeignKey("clases.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    iniciador_id = Column(
+        Integer,
+        ForeignKey("cuentas_v2.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    # activa | finalizada
+    estado = Column(String(20), nullable=False, default="activa", server_default="activa")
+    titulo = Column(String(120), nullable=True)  # opcional: "Repaso parcial"
+    creada_en = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    finalizada_en = Column(DateTime(timezone=True), nullable=True)
+
+    participantes = relationship(
+        "ParticipanteLlamadaDB",
+        back_populates="llamada",
+        cascade="all, delete-orphan",
+    )
+
+
+class ParticipanteLlamadaDB(Base):
+    """
+    Sesión de un usuario dentro de una llamada grupal. Una fila por entrada:
+    si alguien sale y vuelve, se crea otra. Eso permite reconstruir el historial
+    de la llamada y, sobre todo, distinguir "todavía dentro" (salio_en IS NULL)
+    de "ya salió".
+    """
+    __tablename__ = "participantes_llamada"
+
+    id = Column(Integer, primary_key=True, index=True)
+    llamada_id = Column(
+        Integer,
+        ForeignKey("llamadas_grupales.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    usuario_id = Column(
+        Integer,
+        ForeignKey("cuentas_v2.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    unido_en = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    salio_en = Column(DateTime(timezone=True), nullable=True)
+
+    llamada = relationship("LlamadaGrupalDB", back_populates="participantes")
+
+
 class SuscripcionAnuncioDB(Base):
     """
     Opt-in del usuario para recibir notificaciones cuando alguien comente un

@@ -22,7 +22,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from entidades import AnuncioClaseDB, SuscripcionAnuncioDB, UsuarioDB
+from entidades import AnuncioClaseDB, LlamadaGrupalDB, SuscripcionAnuncioDB, UsuarioDB
 from migraciones import aplicar_migraciones_idempotentes
 from motor_db import Base, SessionLocal, engine, obtener_sesion
 from servicio_anuncios import ControladorAnuncios
@@ -48,6 +48,7 @@ from servicio_rate_limit import (
     limitador_registro,
 )
 from servicio_tareas import ControladorTareas
+from servicio_llamada_grupal import ControladorLlamadaGrupal
 from servicio_videollamada import ESTADOS_SENALIZABLES, ControladorVideollamada
 from servicio_usuarios import ControladorUsuarios
 from servicio_ws import gestor_conexiones
@@ -71,7 +72,10 @@ from validadores import (
     EntregaResumen,
     EstudianteResumen,
     InscripcionPeticion,
+    LlamadaGrupalCrear,
+    LlamadaGrupalResumen,
     LoginPeticion,
+    ParticipanteLlamadaResumen,
     MensajeActualizar,
     MensajeCrear,
     MensajeResumen,
@@ -1721,6 +1725,225 @@ def endpoint_video_config():
 
 
 # ----------------------------------------------------------------------
+# Llamadas grupales (modo aula)
+# ----------------------------------------------------------------------
+
+def _resumen_llamada_grupal(
+    db: Session, llamada: LlamadaGrupalDB,
+) -> LlamadaGrupalResumen:
+    """Hidrata participantes activos + nombres para no exponer ids sueltos."""
+    ctrl = ControladorLlamadaGrupal(db)
+    activos = ctrl.participantes_activos(llamada.id)
+    nombres = {
+        u.id: u.nombre_completo for u in
+        db.query(UsuarioDB)
+        .filter(UsuarioDB.id.in_([p.usuario_id for p in activos] + [llamada.iniciador_id]))
+        .all()
+    }
+    participantes = [
+        ParticipanteLlamadaResumen(
+            usuario_id=p.usuario_id,
+            nombre=nombres.get(p.usuario_id, "?"),
+            es_iniciador=(p.usuario_id == llamada.iniciador_id),
+            unido_en=p.unido_en,
+        )
+        for p in activos
+    ]
+    return LlamadaGrupalResumen(
+        id=llamada.id,
+        clase_id=llamada.clase_id,
+        iniciador_id=llamada.iniciador_id,
+        iniciador_nombre=nombres.get(llamada.iniciador_id, "?"),
+        titulo=llamada.titulo,
+        estado=llamada.estado,
+        creada_en=llamada.creada_en,
+        finalizada_en=llamada.finalizada_en,
+        participantes=participantes,
+    )
+
+
+def _cargar_llamada_grupal_o_404(
+    db: Session, llamada_id: int,
+) -> LlamadaGrupalDB:
+    llamada = ControladorLlamadaGrupal(db).obtener(llamada_id)
+    if llamada is None:
+        raise HTTPException(status_code=404, detail="Llamada grupal no encontrada.")
+    return llamada
+
+
+@app.post(
+    "/api/clases/{clase_id}/llamada-grupal",
+    response_model=LlamadaGrupalResumen,
+    status_code=status.HTTP_201_CREATED,
+)
+async def endpoint_iniciar_llamada_grupal(
+    datos: LlamadaGrupalCrear,
+    request: Request,
+    clase_id: int = Path(..., ge=1),
+    tutor: UsuarioDB = Depends(exigir_rol("tutor")),
+    db: Session = Depends(obtener_sesion),
+):
+    clase = ControladorClases(db).obtener_clase(clase_id)
+    if clase is None:
+        raise HTTPException(status_code=404, detail="Clase no encontrada.")
+    if clase.tutor_id != tutor.id:
+        raise HTTPException(status_code=403, detail="Solo el tutor de la clase puede iniciarla.")
+    ctrl = ControladorLlamadaGrupal(db)
+    try:
+        llamada = ctrl.iniciar(clase, tutor, titulo=datos.titulo)
+    except (ValueError, PermissionError) as exc:
+        codigo = 400 if isinstance(exc, ValueError) else 403
+        raise HTTPException(status_code=codigo, detail=str(exc))
+
+    auditar(
+        db, "llamada_grupal_iniciada", actor_id=tutor.id,
+        recurso_tipo="llamada_grupal", recurso_id=llamada.id, ip=_ip_de(request),
+        detalles=f"clase={clase_id}",
+    )
+
+    resumen = _resumen_llamada_grupal(db, llamada)
+    payload = {"tipo": "grupal_iniciada", "llamada": resumen.model_dump(mode="json")}
+
+    # Notificar a los inscritos por WS + persistencia para offline.
+    inscritos = ControladorClases(db).listar_estudiantes_ids(clase_id)
+    await gestor_conexiones.enviar_a_varios(inscritos, payload)
+    await _notificar(
+        db, inscritos,
+        tipo="llamada_grupal_iniciada",
+        titulo=f"📹 {clase.nombre}: llamada grupal en curso",
+        cuerpo=f"{tutor.nombre_completo} inició la llamada. Únete cuando quieras.",
+        enlace_tipo="llamada_grupal",
+        enlace_id=llamada.id,
+    )
+    return resumen
+
+
+@app.get(
+    "/api/clases/{clase_id}/llamada-grupal/activa",
+)
+def endpoint_llamada_grupal_activa(
+    clase_id: int = Path(..., ge=1),
+    usuario: UsuarioDB = Depends(obtener_usuario_actual),
+    db: Session = Depends(obtener_sesion),
+):
+    clase = ControladorClases(db).obtener_clase(clase_id)
+    if clase is None:
+        raise HTTPException(status_code=404, detail="Clase no encontrada.")
+    ctrl = ControladorLlamadaGrupal(db)
+    if not ctrl.es_miembro_clase(clase, usuario):
+        raise HTTPException(status_code=403, detail="No eres miembro de esta clase.")
+    llamada = ctrl.activa_en_clase(clase_id)
+    if llamada is None:
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+    return _resumen_llamada_grupal(db, llamada)
+
+
+@app.post(
+    "/api/llamadas-grupales/{llamada_id}/unirse",
+    response_model=LlamadaGrupalResumen,
+)
+async def endpoint_unirse_llamada_grupal(
+    request: Request,
+    llamada_id: int = Path(..., ge=1),
+    usuario: UsuarioDB = Depends(obtener_usuario_actual),
+    db: Session = Depends(obtener_sesion),
+):
+    llamada = _cargar_llamada_grupal_o_404(db, llamada_id)
+    clase = ControladorClases(db).obtener_clase(llamada.clase_id)
+    if clase is None:
+        raise HTTPException(status_code=404, detail="Clase de la llamada no existe.")
+    ctrl = ControladorLlamadaGrupal(db)
+    try:
+        ctrl.unirse(llamada, clase, usuario)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+
+    auditar(
+        db, "llamada_grupal_unido", actor_id=usuario.id,
+        recurso_tipo="llamada_grupal", recurso_id=llamada.id, ip=_ip_de(request),
+    )
+
+    resumen = _resumen_llamada_grupal(db, llamada)
+
+    # Aviso por WS al resto de participantes para que abran su PC contra el
+    # nuevo peer (clave del mesh: el nuevo no sabe a quién contactar hasta
+    # leer la lista que viene en la respuesta REST).
+    otros = [p.usuario_id for p in ctrl.participantes_activos(llamada.id) if p.usuario_id != usuario.id]
+    await gestor_conexiones.enviar_a_varios(otros, {
+        "tipo": "grupal_unido",
+        "llamada_id": llamada.id,
+        "usuario_id": usuario.id,
+        "nombre": usuario.nombre_completo,
+    })
+    return resumen
+
+
+@app.post(
+    "/api/llamadas-grupales/{llamada_id}/salir",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def endpoint_salir_llamada_grupal(
+    request: Request,
+    llamada_id: int = Path(..., ge=1),
+    usuario: UsuarioDB = Depends(obtener_usuario_actual),
+    db: Session = Depends(obtener_sesion),
+):
+    llamada = _cargar_llamada_grupal_o_404(db, llamada_id)
+    ctrl = ControladorLlamadaGrupal(db)
+    registro = ctrl.salir(llamada, usuario)
+    if registro is None:
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    auditar(
+        db, "llamada_grupal_salido", actor_id=usuario.id,
+        recurso_tipo="llamada_grupal", recurso_id=llamada.id, ip=_ip_de(request),
+    )
+
+    otros = [p.usuario_id for p in ctrl.participantes_activos(llamada.id) if p.usuario_id != usuario.id]
+    await gestor_conexiones.enviar_a_varios(otros, {
+        "tipo": "grupal_salido",
+        "llamada_id": llamada.id,
+        "usuario_id": usuario.id,
+    })
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.post(
+    "/api/llamadas-grupales/{llamada_id}/finalizar",
+    response_model=LlamadaGrupalResumen,
+)
+async def endpoint_finalizar_llamada_grupal(
+    request: Request,
+    llamada_id: int = Path(..., ge=1),
+    usuario: UsuarioDB = Depends(obtener_usuario_actual),
+    db: Session = Depends(obtener_sesion),
+):
+    llamada = _cargar_llamada_grupal_o_404(db, llamada_id)
+    ctrl = ControladorLlamadaGrupal(db)
+    try:
+        ctrl.finalizar(llamada, usuario)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+
+    auditar(
+        db, "llamada_grupal_finalizada", actor_id=usuario.id,
+        recurso_tipo="llamada_grupal", recurso_id=llamada.id, ip=_ip_de(request),
+    )
+
+    resumen = _resumen_llamada_grupal(db, llamada)
+    # Broadcast a todos los inscritos para que cierren su UI; los que estaban
+    # dentro reciben además `participantes=[]` por estar ya cerrada.
+    inscritos = ControladorClases(db).listar_estudiantes_ids(llamada.clase_id) + [llamada.iniciador_id]
+    await gestor_conexiones.enviar_a_varios(list(set(inscritos)), {
+        "tipo": "grupal_finalizada",
+        "llamada": resumen.model_dump(mode="json"),
+    })
+    return resumen
+
+
+# ----------------------------------------------------------------------
 # WebSocket
 # ----------------------------------------------------------------------
 
@@ -1843,6 +2066,69 @@ async def websocket_chat(websocket: WebSocket, token: str = Query(...)):
                         if clave in data:
                             payload[clave] = data[clave]
                     await gestor_conexiones.enviar_a(contraparte, payload)
+                finally:
+                    db_local.close()
+                continue
+
+            # ---------- Señalización grupal (mesh: peer ↔ peer dentro de una llamada) ----------
+            # Cada mensaje lleva `llamada_id` y `destino_id` (el peer al que va
+            # dirigido). El backend valida participación y reenvía añadiendo
+            # `origen_id` para que el receptor sepa de quién viene.
+            if tipo in (
+                "grupal_offer", "grupal_answer", "grupal_ice",
+                "grupal_estado", "grupal_colgar",
+            ):
+                llamada_id = int(data.get("llamada_id", 0) or 0)
+                destino_id = int(data.get("destino_id", 0) or 0)
+                if not llamada_id:
+                    await websocket.send_json({"tipo": "error", "mensaje": "llamada_id requerido."})
+                    continue
+                db_local = SessionLocal()
+                try:
+                    ctrl_grupal = ControladorLlamadaGrupal(db_local)
+                    llamada = ctrl_grupal.obtener(llamada_id)
+                    if llamada is None or llamada.estado != "activa":
+                        await websocket.send_json({"tipo": "error", "mensaje": "Llamada inaccesible."})
+                        continue
+                    if not ctrl_grupal.esta_dentro(llamada_id, user_id):
+                        await websocket.send_json({"tipo": "error", "mensaje": "No participas en esta llamada."})
+                        continue
+
+                    if tipo == "grupal_colgar":
+                        # Equivalente a "salir": cierra el registro del usuario
+                        # y avisa al resto. No finaliza la llamada (solo el
+                        # iniciador puede vía REST `/finalizar`).
+                        ctrl_grupal.salir(llamada, usuario)
+                        otros = [
+                            p.usuario_id for p in ctrl_grupal.participantes_activos(llamada_id)
+                            if p.usuario_id != user_id
+                        ]
+                        await gestor_conexiones.enviar_a_varios(otros, {
+                            "tipo": "grupal_salido",
+                            "llamada_id": llamada_id,
+                            "usuario_id": user_id,
+                        })
+                        continue
+
+                    # Resto de tipos requieren destino válido y dentro.
+                    if not destino_id:
+                        await websocket.send_json({"tipo": "error", "mensaje": "destino_id requerido."})
+                        continue
+                    if not ctrl_grupal.esta_dentro(llamada_id, destino_id):
+                        await websocket.send_json({"tipo": "error", "mensaje": "Destino no está en la llamada."})
+                        continue
+
+                    payload = {
+                        "tipo": tipo, "llamada_id": llamada_id,
+                        "origen_id": user_id, "destino_id": destino_id,
+                    }
+                    for clave in (
+                        "sdp", "type", "candidate", "sdpMid", "sdpMLineIndex",
+                        "cam", "mic", "pantalla",
+                    ):
+                        if clave in data:
+                            payload[clave] = data[clave]
+                    await gestor_conexiones.enviar_a(destino_id, payload)
                 finally:
                     db_local.close()
                 continue
