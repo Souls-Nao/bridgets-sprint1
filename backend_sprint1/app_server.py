@@ -1154,12 +1154,16 @@ async def endpoint_calificar(
 @app.post("/api/clases/{clase_id}/birdgt", response_model=BirdgtIniciarRespuesta, status_code=status.HTTP_201_CREATED)
 async def endpoint_iniciar_birdgt(
     clase_id: int = Path(..., ge=1),
+    estudiante_id: Optional[int] = Query(None, ge=1, description="Si lo envía un tutor, abre la sala solo con ese estudiante."),
     usuario: UsuarioDB = Depends(obtener_usuario_actual),
     db: Session = Depends(obtener_sesion),
 ):
     clase = _exigir_acceso_clase(db, clase_id, usuario)
     chat = ControladorChat(db)
-    salas, creadas, reutilizadas = chat.iniciar(clase, usuario)
+    try:
+        salas, creadas, reutilizadas = chat.iniciar(clase, usuario, estudiante_id=estudiante_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
     resumenes = []
     for sala in salas:

@@ -104,6 +104,49 @@ def test_eliminar_clase_solo_dueno(client, tutor):
     assert client.get(f"/api/clases/{clase['id']}", headers=auth_t).status_code == 404
 
 
+def test_tutor_birdgt_dirigido_a_un_estudiante(client, tutor, estudiante):
+    """El tutor puede abrir Birdgt con UN estudiante específico vía
+    `?estudiante_id=`, sin enviar solicitud a todos los demás."""
+    auth_t = {"Authorization": f"Bearer {tutor['token']}"}
+    auth_e = {"Authorization": f"Bearer {estudiante['token']}"}
+    clase = _crear_clase(client, auth_t)
+    # Inscribimos dos estudiantes para asegurar el aislamiento.
+    client.post("/api/inscripciones", headers=auth_e, json={"codigo_clase": clase["codigo_clase"]})
+    client.post("/api/registro", json={
+        "nombre_completo": "Otro", "codigo": "9",
+        "correo_electronico": "otro@x.com", "usuario_login": "otro_est",
+        "password": "password-segura", "tipo_cuenta": "estudiante",
+    })
+    otro = client.post("/api/login", json={
+        "usuario_login": "otro_est", "password": "password-segura",
+    }).json()
+    client.post("/api/inscripciones", headers={"Authorization": f"Bearer {otro['token']}"},
+                json={"codigo_clase": clase["codigo_clase"]})
+
+    # Tutor dispara Birdgt solo con el primer estudiante.
+    r = client.post(
+        f"/api/clases/{clase['id']}/birdgt",
+        headers=auth_t,
+        params={"estudiante_id": estudiante["id"]},
+    )
+    assert r.status_code == 201, r.text
+    salas = r.json()["salas"]
+    assert len(salas) == 1
+    assert salas[0]["contraparte"]["id"] == estudiante["id"]
+
+
+def test_tutor_birdgt_dirigido_rechaza_estudiante_externo(client, tutor):
+    """Si el id no está inscrito en la clase, el endpoint responde 400."""
+    auth_t = {"Authorization": f"Bearer {tutor['token']}"}
+    clase = _crear_clase(client, auth_t)
+    r = client.post(
+        f"/api/clases/{clase['id']}/birdgt",
+        headers=auth_t,
+        params={"estudiante_id": 9999},
+    )
+    assert r.status_code == 400
+
+
 def test_clase_privada_no_aparece_en_busqueda_publica(client, tutor):
     auth_t = {"Authorization": f"Bearer {tutor['token']}"}
     publica = _crear_clase(client, auth_t, nombre="Pública", privada=False)

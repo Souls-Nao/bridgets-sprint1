@@ -45,23 +45,50 @@ class ControladorChat:
         self.db = db
 
     # ---------- Inicio (tutor o estudiante) ----------
-    def iniciar(self, clase: ClaseDB, usuario: UsuarioDB) -> Tuple[List[SalaChatDB], int, int]:
+    def iniciar(
+        self,
+        clase: ClaseDB,
+        usuario: UsuarioDB,
+        estudiante_id: Optional[int] = None,
+    ) -> Tuple[List[SalaChatDB], int, int]:
         """
         Devuelve (lista de salas afectadas, creadas, reutilizadas).
-        Tutor: crea/reutiliza una sala con cada estudiante inscrito.
-        Estudiante: crea/reutiliza la sala con el tutor de la clase.
+
+        Reglas:
+          - Estudiante: crea/reutiliza la sala con el tutor de la clase. El
+            parámetro `estudiante_id` se ignora (no le aplica).
+          - Tutor sin `estudiante_id`: crea/reutiliza una sala con CADA
+            estudiante inscrito (comportamiento histórico, sigue valiendo para
+            "saludar a toda la clase").
+          - Tutor con `estudiante_id`: solo crea/reutiliza la sala con ese
+            estudiante en particular, siempre que esté inscrito. Si no lo
+            está, lanza ValueError.
         """
         creadas = 0
         reutilizadas = 0
         salas: List[SalaChatDB] = []
 
         if usuario.tipo_cuenta == "tutor":
-            estudiantes_ids = [
-                fila.estudiante_id
-                for fila in self.db.query(InscripcionDB.estudiante_id)
-                .filter(InscripcionDB.clase_id == clase.id)
-                .all()
-            ]
+            if estudiante_id is not None:
+                # Verificar inscripción para no abrir chats a usuarios externos.
+                pertenece = (
+                    self.db.query(InscripcionDB.id)
+                    .filter(
+                        InscripcionDB.clase_id == clase.id,
+                        InscripcionDB.estudiante_id == estudiante_id,
+                    )
+                    .first()
+                )
+                if pertenece is None:
+                    raise ValueError("Ese estudiante no está inscrito en la clase.")
+                estudiantes_ids = [estudiante_id]
+            else:
+                estudiantes_ids = [
+                    fila.estudiante_id
+                    for fila in self.db.query(InscripcionDB.estudiante_id)
+                    .filter(InscripcionDB.clase_id == clase.id)
+                    .all()
+                ]
             for est_id in estudiantes_ids:
                 sala, fue_creada = self._upsert_sala(clase, est_id, clase.tutor_id, iniciador_id=usuario.id)
                 salas.append(sala)
