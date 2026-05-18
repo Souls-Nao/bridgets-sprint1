@@ -345,6 +345,17 @@ class LlamadaGrupalDB(Base):
         ForeignKey("cuentas_v2.id", ondelete="CASCADE"),
         nullable=False,
     )
+    # Propietario MUTABLE: quien tiene actualmente la autoridad para cerrar la
+    # llamada para todos. Por defecto coincide con `iniciador_id`, pero si el
+    # propietario sale mientras la llamada sigue activa, la propiedad pasa al
+    # siguiente participante más antiguo (ver `ControladorLlamadaGrupal.salir`).
+    # Esto permite al tutor abandonar y abrir otra llamada en otra clase sin
+    # bloquear la presente, igual que Meet/Zoom delegan al "host" alterno.
+    propietario_id = Column(
+        Integer,
+        ForeignKey("cuentas_v2.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     # activa | finalizada
     estado = Column(String(20), nullable=False, default="activa", server_default="activa")
     titulo = Column(String(120), nullable=True)  # opcional: "Repaso parcial"

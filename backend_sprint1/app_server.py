@@ -1734,17 +1734,20 @@ def _resumen_llamada_grupal(
     """Hidrata participantes activos + nombres para no exponer ids sueltos."""
     ctrl = ControladorLlamadaGrupal(db)
     activos = ctrl.participantes_activos(llamada.id)
+    ids_relevantes = {p.usuario_id for p in activos}
+    ids_relevantes.add(llamada.iniciador_id)
+    if llamada.propietario_id is not None:
+        ids_relevantes.add(llamada.propietario_id)
     nombres = {
         u.id: u.nombre_completo for u in
-        db.query(UsuarioDB)
-        .filter(UsuarioDB.id.in_([p.usuario_id for p in activos] + [llamada.iniciador_id]))
-        .all()
+        db.query(UsuarioDB).filter(UsuarioDB.id.in_(ids_relevantes)).all()
     }
     participantes = [
         ParticipanteLlamadaResumen(
             usuario_id=p.usuario_id,
             nombre=nombres.get(p.usuario_id, "?"),
             es_iniciador=(p.usuario_id == llamada.iniciador_id),
+            es_propietario=(p.usuario_id == llamada.propietario_id),
             unido_en=p.unido_en,
         )
         for p in activos
@@ -1754,6 +1757,8 @@ def _resumen_llamada_grupal(
         clase_id=llamada.clase_id,
         iniciador_id=llamada.iniciador_id,
         iniciador_nombre=nombres.get(llamada.iniciador_id, "?"),
+        propietario_id=llamada.propietario_id,
+        propietario_nombre=nombres.get(llamada.propietario_id) if llamada.propietario_id else None,
         titulo=llamada.titulo,
         estado=llamada.estado,
         creada_en=llamada.creada_en,
@@ -1892,7 +1897,7 @@ async def endpoint_salir_llamada_grupal(
 ):
     llamada = _cargar_llamada_grupal_o_404(db, llamada_id)
     ctrl = ControladorLlamadaGrupal(db)
-    registro = ctrl.salir(llamada, usuario)
+    registro, nuevo_propietario_id = ctrl.salir(llamada, usuario)
     if registro is None:
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -1907,6 +1912,26 @@ async def endpoint_salir_llamada_grupal(
         "llamada_id": llamada.id,
         "usuario_id": usuario.id,
     })
+
+    if llamada.estado == "finalizada":
+        # Salió el último participante → la llamada se cerró automáticamente.
+        # Avisamos a todos los inscritos para que limpien banners y UIs.
+        inscritos = ControladorClases(db).listar_estudiantes_ids(llamada.clase_id) + [llamada.iniciador_id]
+        await gestor_conexiones.enviar_a_varios(list(set(inscritos)), {
+            "tipo": "grupal_finalizada",
+            "llamada": _resumen_llamada_grupal(db, llamada).model_dump(mode="json"),
+        })
+    elif nuevo_propietario_id is not None:
+        # Traspaso de propiedad: notificamos a TODOS los que siguen dentro
+        # para que la UI actualice el nombre del propietario y, en el cliente
+        # nuevo propietario, habilite el botón "Finalizar para todos".
+        activos_ids = [p.usuario_id for p in ctrl.participantes_activos(llamada.id)]
+        await gestor_conexiones.enviar_a_varios(activos_ids, {
+            "tipo": "grupal_propietario_cambiado",
+            "llamada_id": llamada.id,
+            "propietario_id": nuevo_propietario_id,
+        })
+
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -2095,10 +2120,10 @@ async def websocket_chat(websocket: WebSocket, token: str = Query(...)):
                         continue
 
                     if tipo == "grupal_colgar":
-                        # Equivalente a "salir": cierra el registro del usuario
-                        # y avisa al resto. No finaliza la llamada (solo el
-                        # iniciador puede vía REST `/finalizar`).
-                        ctrl_grupal.salir(llamada, usuario)
+                        # Equivalente a "salir" sin finalizar la llamada
+                        # (solo el propietario actual puede finalizar vía REST).
+                        # Si el saliente era propietario, `salir` cede el control.
+                        _, nuevo_prop = ctrl_grupal.salir(llamada, usuario)
                         otros = [
                             p.usuario_id for p in ctrl_grupal.participantes_activos(llamada_id)
                             if p.usuario_id != user_id
@@ -2108,6 +2133,19 @@ async def websocket_chat(websocket: WebSocket, token: str = Query(...)):
                             "llamada_id": llamada_id,
                             "usuario_id": user_id,
                         })
+                        if llamada.estado == "finalizada":
+                            inscritos = ControladorClases(db_local).listar_estudiantes_ids(llamada.clase_id) + [llamada.iniciador_id]
+                            await gestor_conexiones.enviar_a_varios(list(set(inscritos)), {
+                                "tipo": "grupal_finalizada",
+                                "llamada": _resumen_llamada_grupal(db_local, llamada).model_dump(mode="json"),
+                            })
+                        elif nuevo_prop is not None:
+                            activos_ids = [p.usuario_id for p in ctrl_grupal.participantes_activos(llamada_id)]
+                            await gestor_conexiones.enviar_a_varios(activos_ids, {
+                                "tipo": "grupal_propietario_cambiado",
+                                "llamada_id": llamada_id,
+                                "propietario_id": nuevo_prop,
+                            })
                         continue
 
                     # Resto de tipos requieren destino válido y dentro.

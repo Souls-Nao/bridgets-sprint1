@@ -350,6 +350,7 @@ class ParticipanteLlamadaResumen(BaseModel):
     usuario_id: int
     nombre: str
     es_iniciador: bool = False
+    es_propietario: bool = False
     unido_en: datetime
 
 
@@ -358,6 +359,8 @@ class LlamadaGrupalResumen(BaseModel):
     clase_id: int
     iniciador_id: int
     iniciador_nombre: str
+    propietario_id: Optional[int] = None
+    propietario_nombre: Optional[str] = None
     titulo: Optional[str] = None
     estado: str
     creada_en: datetime

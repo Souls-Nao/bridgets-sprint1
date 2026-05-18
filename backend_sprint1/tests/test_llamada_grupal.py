@@ -120,6 +120,55 @@ def test_salir_es_idempotente(client, tutor, estudiante):
     assert client.post(f"/api/llamadas-grupales/{llamada['id']}/salir", headers=_auth(estudiante)).status_code == 204
 
 
+def test_tutor_salir_transfiere_propiedad_al_siguiente(client, tutor, estudiante):
+    """Cuando el propietario sale y queda al menos otro participante, la
+    propiedad pasa al más antiguo y la llamada sigue activa."""
+    clase = _crear_clase_con(tutor, estudiante, client=client)
+    llamada = client.post(
+        f"/api/clases/{clase['id']}/llamada-grupal", headers=_auth(tutor), json={},
+    ).json()
+    assert llamada["propietario_id"] == tutor["id"]
+    client.post(f"/api/llamadas-grupales/{llamada['id']}/unirse", headers=_auth(estudiante))
+
+    # El tutor sale.
+    assert client.post(f"/api/llamadas-grupales/{llamada['id']}/salir", headers=_auth(tutor)).status_code == 204
+
+    # La llamada sigue activa y el estudiante es ahora el propietario.
+    r = client.get(f"/api/clases/{clase['id']}/llamada-grupal/activa", headers=_auth(estudiante))
+    assert r.status_code == 200
+    activa = r.json()
+    assert activa["estado"] == "activa"
+    assert activa["propietario_id"] == estudiante["id"]
+    assert activa["iniciador_id"] == tutor["id"]  # iniciador es histórico
+
+
+def test_propietario_traspasado_puede_finalizar(client, tutor, estudiante):
+    """Tras el traspaso, el nuevo propietario puede cerrar la llamada para
+    todos; el tutor original ya no podría si volviera (no es propietario)."""
+    clase = _crear_clase_con(tutor, estudiante, client=client)
+    llamada = client.post(
+        f"/api/clases/{clase['id']}/llamada-grupal", headers=_auth(tutor), json={},
+    ).json()
+    client.post(f"/api/llamadas-grupales/{llamada['id']}/unirse", headers=_auth(estudiante))
+    client.post(f"/api/llamadas-grupales/{llamada['id']}/salir", headers=_auth(tutor))
+
+    r = client.post(f"/api/llamadas-grupales/{llamada['id']}/finalizar", headers=_auth(estudiante))
+    assert r.status_code == 200
+    assert r.json()["estado"] == "finalizada"
+
+
+def test_salir_del_unico_participante_finaliza_automaticamente(client, tutor):
+    """Si el propietario sale y NO queda nadie más, la llamada se finaliza
+    para evitar dejar registros 'activos' huérfanos en la BD."""
+    clase = _crear_clase_con(tutor, client=client)
+    llamada = client.post(
+        f"/api/clases/{clase['id']}/llamada-grupal", headers=_auth(tutor), json={},
+    ).json()
+    assert client.post(f"/api/llamadas-grupales/{llamada['id']}/salir", headers=_auth(tutor)).status_code == 204
+    r = client.get(f"/api/clases/{clase['id']}/llamada-grupal/activa", headers=_auth(tutor))
+    assert r.status_code == 204  # ya no hay activa
+
+
 def test_solo_iniciador_puede_finalizar(client, tutor, estudiante):
     clase = _crear_clase_con(tutor, estudiante, client=client)
     llamada = client.post(

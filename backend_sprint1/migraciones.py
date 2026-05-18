@@ -20,6 +20,11 @@ def aplicar_migraciones_idempotentes(engine: Engine) -> None:
         "ALTER TABLE archivos_clase ADD COLUMN IF NOT EXISTS categoria VARCHAR(40) NULL",
         # Módulo 6: las nuevas tablas tareas / entregas las crea Base.metadata.create_all,
         # no requieren ALTER aquí.
+        # Fase E (post-deploy): propiedad transferible en llamadas grupales —
+        # el tutor puede salir cediendo el control sin terminar la llamada.
+        # Inicializamos `propietario_id` al `iniciador_id` para filas viejas.
+        "ALTER TABLE llamadas_grupales ADD COLUMN IF NOT EXISTS propietario_id INTEGER NULL REFERENCES cuentas_v2(id) ON DELETE SET NULL",
+        "UPDATE llamadas_grupales SET propietario_id = iniciador_id WHERE propietario_id IS NULL",
     ]
     with engine.begin() as conexion:
         for sql in sentencias:

@@ -95,6 +95,7 @@ class ControladorLlamadaGrupal:
         llamada = LlamadaGrupalDB(
             clase_id=clase.id,
             iniciador_id=usuario.id,
+            propietario_id=usuario.id,  # quien inicia es el primer propietario
             estado="activa",
             titulo=(titulo or None),
         )
@@ -132,7 +133,14 @@ class ControladorLlamadaGrupal:
         self,
         llamada: LlamadaGrupalDB,
         usuario: UsuarioDB,
-    ) -> Optional[ParticipanteLlamadaDB]:
+    ) -> tuple[Optional[ParticipanteLlamadaDB], Optional[int]]:
+        """
+        Cierra el registro del participante. Si el usuario era el propietario y
+        quedan otros activos, traspasa la propiedad al más antiguo todavía
+        dentro y devuelve su id en el segundo elemento del tuple. Si no queda
+        nadie, finaliza la llamada automáticamente (devuelve nuevo_propietario=None).
+        Para llamados que NO eran propietario, simplemente sale.
+        """
         ahora = datetime.now(timezone.utc)
         registro = (
             self.db.query(ParticipanteLlamadaDB)
@@ -145,22 +153,48 @@ class ControladorLlamadaGrupal:
             .first()
         )
         if registro is None:
-            return None
+            return None, None
         registro.salio_en = ahora
+
+        nuevo_propietario_id: Optional[int] = None
+        if llamada.propietario_id == usuario.id and llamada.estado == "activa":
+            # Buscar el siguiente más antiguo todavía dentro (excluyendo al
+            # que acaba de salir).
+            sucesor = (
+                self.db.query(ParticipanteLlamadaDB)
+                .filter(
+                    ParticipanteLlamadaDB.llamada_id == llamada.id,
+                    ParticipanteLlamadaDB.salio_en.is_(None),
+                    ParticipanteLlamadaDB.usuario_id != usuario.id,
+                )
+                .order_by(ParticipanteLlamadaDB.unido_en.asc())
+                .first()
+            )
+            if sucesor is not None:
+                llamada.propietario_id = sucesor.usuario_id
+                nuevo_propietario_id = sucesor.usuario_id
+            else:
+                # Nadie más → finalizar automáticamente para no dejar la
+                # llamada "huérfana" bloqueando otras en la misma clase.
+                llamada.estado = "finalizada"
+                llamada.finalizada_en = ahora
+                llamada.propietario_id = None
         self.db.commit()
         self.db.refresh(registro)
-        return registro
+        self.db.refresh(llamada)
+        return registro, nuevo_propietario_id
 
     def finalizar(
         self,
         llamada: LlamadaGrupalDB,
         usuario: UsuarioDB,
     ) -> LlamadaGrupalDB:
-        # Solo el iniciador o el tutor de la clase pueden terminar la llamada
-        # (en este modelo siempre coinciden, pero lo dejamos explícito por si
-        # alguna vez los desacoplamos).
-        if usuario.id != llamada.iniciador_id:
-            raise PermissionError("Solo quien inició la llamada puede finalizarla.")
+        # Permiso: el propietario actual (que puede haber cambiado desde el
+        # inicio si el iniciador salió cediendo el control). Mantenemos al
+        # iniciador como permitido por compatibilidad, aunque tras salir
+        # normalmente ya no aparezca como participante.
+        if usuario.id not in (llamada.propietario_id, llamada.iniciador_id):
+            raise PermissionError("Solo el propietario actual de la llamada puede finalizarla.")
         if llamada.estado != "activa":
             return llamada  # idempotente
         ahora = datetime.now(timezone.utc)
