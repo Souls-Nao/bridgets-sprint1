@@ -29,3 +29,17 @@ services:
       # --- CORS (opcional: descomenta si añades cliente web en el futuro) ---
       # - key: BRIDGETS_CORS_ORIGINS
       #   value: "https://tu-dominio-cliente.com"
+
+      # --- Videollamadas: STUN/TURN para WebRTC ---
+      # STUN gratuito por defecto. CSV para listar varios servidores.
+      - key: BRIDGETS_STUN_URLS
+        value: "stun:stun.l.google.com:19302"
+      # TURN opcional (necesario tras NAT simétrica / firewalls estrictos).
+      # Los tres valores deben estar definidos para que el server se anuncie
+      # al cliente; si falta alguno, solo se envía STUN.
+      # - key: BRIDGETS_TURN_URL
+      #   value: "turn:turn.tudominio.com:3478"
+      # - key: BRIDGETS_TURN_USER
+      #   sync: false
+      # - key: BRIDGETS_TURN_CRED
+      #   sync: false

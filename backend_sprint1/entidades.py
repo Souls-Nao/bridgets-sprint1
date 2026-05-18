@@ -280,3 +280,42 @@ class TokenRevocadoDB(Base):
     jti = Column(String(64), primary_key=True, index=True)
     expira_en = Column(DateTime(timezone=True), nullable=False, index=True)
     revocado_en = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class SesionVideoDB(Base):
+    """
+    Videollamada 1-a-1 entre tutor y estudiante, anidada en una sala de chat.
+    El backend solo es servidor de señalización (SDP/ICE viajan por el WS de
+    chat existente); los medios son P2P. Esta tabla guarda únicamente el
+    ciclo de vida de la sesión (solicitada → aceptada → activa → finalizada).
+    """
+    __tablename__ = "sesiones_video"
+
+    id = Column(Integer, primary_key=True, index=True)
+    sala_id = Column(
+        Integer,
+        ForeignKey("salas_chat.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    iniciador_id = Column(
+        Integer,
+        ForeignKey("cuentas_v2.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    receptor_id = Column(
+        Integer,
+        ForeignKey("cuentas_v2.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    # solicitada | aceptada | rechazada | activa | finalizada | perdida
+    estado = Column(String(20), nullable=False, default="solicitada", server_default="solicitada")
+    # camara | pantalla | ambos
+    modo = Column(String(20), nullable=False, default="camara", server_default="camara")
+    creada_en = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    aceptada_en = Column(DateTime(timezone=True), nullable=True)
+    finalizada_en = Column(DateTime(timezone=True), nullable=True)
+    # colgada | rechazada | timeout_solicitud | error_ice | otro
+    motivo_fin = Column(String(40), nullable=True)
+
+    sala = relationship("SalaChatDB")

@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
@@ -309,3 +309,32 @@ class BirdgtIniciarRespuesta(BaseModel):
     salas: list[SalaResumen]
     creadas: int
     reutilizadas: int
+
+
+# ------------------------- Videollamadas -------------------------
+
+class VideoSesionCrear(BaseModel):
+    sala_id: int = Field(..., ge=1)
+    # camara: solo cámara + audio. pantalla: solo pantalla compartida.
+    # ambos: cámara + pantalla simultáneas.
+    modo: Literal["camara", "pantalla", "ambos"] = "camara"
+
+
+class VideoSesionResumen(BaseModel):
+    id: int
+    sala_id: int
+    iniciador_id: int
+    receptor_id: int
+    estado: str
+    modo: str
+    creada_en: datetime
+    aceptada_en: Optional[datetime] = None
+    finalizada_en: Optional[datetime] = None
+    motivo_fin: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class VideoConfigRespuesta(BaseModel):
+    """Configuración WebRTC que el cliente usa para crear su `RTCPeerConnection`."""
+    ice_servers: list[dict]

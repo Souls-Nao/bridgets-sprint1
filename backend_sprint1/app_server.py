@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+from typing import Optional
 
 from fastapi import (
     Depends,
@@ -47,6 +48,7 @@ from servicio_rate_limit import (
     limitador_registro,
 )
 from servicio_tareas import ControladorTareas
+from servicio_videollamada import ESTADOS_SENALIZABLES, ControladorVideollamada
 from servicio_usuarios import ControladorUsuarios
 from servicio_ws import gestor_conexiones
 from validadores import (
@@ -86,6 +88,9 @@ from validadores import (
     TareaCrear,
     TareaResumen,
     TotalNoLeidas,
+    VideoConfigRespuesta,
+    VideoSesionCrear,
+    VideoSesionResumen,
 )
 
 # ----------------------------------------------------------------------
@@ -1434,6 +1439,181 @@ def endpoint_marcar_todas_leidas(
 
 
 # ----------------------------------------------------------------------
+# Videollamadas (señalización por WS; este bloque solo gestiona estado)
+# ----------------------------------------------------------------------
+
+def _cargar_sesion_video_o_404(db: Session, sesion_id: int, usuario: UsuarioDB):
+    """Trae la sesión y verifica que el usuario participa; si no, 404/403."""
+    ctrl = ControladorVideollamada(db)
+    sesion = ctrl.obtener(sesion_id)
+    if sesion is None:
+        raise HTTPException(status_code=404, detail="Sesión de video no encontrada.")
+    if not ctrl.participa(sesion, usuario):
+        raise HTTPException(status_code=403, detail="No participas en esta sesión.")
+    return ctrl, sesion
+
+
+def _resumen_video_json(sesion) -> dict:
+    return VideoSesionResumen.model_validate(sesion).model_dump(mode="json")
+
+
+def _duracion_segundos(sesion) -> Optional[int]:
+    if sesion.aceptada_en is None or sesion.finalizada_en is None:
+        return None
+    return int((sesion.finalizada_en - sesion.aceptada_en).total_seconds())
+
+
+@app.post("/api/video/sesiones", response_model=VideoSesionResumen, status_code=status.HTTP_201_CREATED)
+async def endpoint_iniciar_video(
+    datos: VideoSesionCrear,
+    request: Request,
+    usuario: UsuarioDB = Depends(obtener_usuario_actual),
+    db: Session = Depends(obtener_sesion),
+):
+    sala = ControladorChat(db).obtener_sala(datos.sala_id)
+    if sala is None:
+        raise HTTPException(status_code=404, detail="Sala no encontrada.")
+    if usuario.id not in (sala.estudiante_id, sala.tutor_id):
+        raise HTTPException(status_code=403, detail="No participas en esta sala.")
+    ctrl = ControladorVideollamada(db)
+    try:
+        sesion = ctrl.iniciar(sala, usuario, datos.modo)
+    except (ValueError, PermissionError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    auditar(
+        db, "video_iniciada", actor_id=usuario.id,
+        recurso_tipo="sesion_video", recurso_id=sesion.id, ip=_ip_de(request),
+        detalles=f"sala={sala.id}, modo={datos.modo}",
+    )
+    metricas.registrar_video("iniciada")
+    await gestor_conexiones.enviar_a(sesion.receptor_id, {
+        "tipo": "video_solicitud",
+        "sesion": _resumen_video_json(sesion),
+    })
+    return sesion
+
+
+@app.post("/api/video/sesiones/{sesion_id}/aceptar", response_model=VideoSesionResumen)
+async def endpoint_aceptar_video(
+    request: Request,
+    sesion_id: int = Path(..., ge=1),
+    usuario: UsuarioDB = Depends(obtener_usuario_actual),
+    db: Session = Depends(obtener_sesion),
+):
+    ctrl, sesion = _cargar_sesion_video_o_404(db, sesion_id, usuario)
+    try:
+        sesion = ctrl.aceptar(sesion, usuario)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    auditar(
+        db, "video_aceptada", actor_id=usuario.id,
+        recurso_tipo="sesion_video", recurso_id=sesion.id, ip=_ip_de(request),
+    )
+    metricas.registrar_video("aceptada")
+    payload = {"tipo": "video_aceptada", "sesion": _resumen_video_json(sesion)}
+    await gestor_conexiones.enviar_a_varios(
+        [sesion.iniciador_id, sesion.receptor_id], payload,
+    )
+    return sesion
+
+
+@app.post("/api/video/sesiones/{sesion_id}/rechazar", response_model=VideoSesionResumen)
+async def endpoint_rechazar_video(
+    request: Request,
+    sesion_id: int = Path(..., ge=1),
+    usuario: UsuarioDB = Depends(obtener_usuario_actual),
+    db: Session = Depends(obtener_sesion),
+):
+    ctrl, sesion = _cargar_sesion_video_o_404(db, sesion_id, usuario)
+    try:
+        sesion = ctrl.rechazar(sesion, usuario)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    auditar(
+        db, "video_rechazada", actor_id=usuario.id,
+        recurso_tipo="sesion_video", recurso_id=sesion.id, ip=_ip_de(request),
+    )
+    metricas.registrar_video("rechazada", motivo="rechazada")
+    await gestor_conexiones.enviar_a(sesion.iniciador_id, {
+        "tipo": "video_rechazada", "sesion": _resumen_video_json(sesion),
+    })
+    return sesion
+
+
+@app.post("/api/video/sesiones/{sesion_id}/finalizar", response_model=VideoSesionResumen)
+async def endpoint_finalizar_video(
+    request: Request,
+    sesion_id: int = Path(..., ge=1),
+    usuario: UsuarioDB = Depends(obtener_usuario_actual),
+    db: Session = Depends(obtener_sesion),
+):
+    ctrl, sesion = _cargar_sesion_video_o_404(db, sesion_id, usuario)
+    try:
+        sesion = ctrl.finalizar(sesion, usuario, motivo="colgada")
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    duracion = _duracion_segundos(sesion)
+    detalles = f"motivo={sesion.motivo_fin}"
+    if duracion is not None:
+        detalles += f", duracion_s={duracion}"
+    auditar(
+        db, "video_finalizada", actor_id=usuario.id,
+        recurso_tipo="sesion_video", recurso_id=sesion.id, ip=_ip_de(request),
+        detalles=detalles,
+    )
+    metricas.registrar_video("finalizada", motivo=sesion.motivo_fin, duracion_seg=duracion)
+    contraparte = sesion.receptor_id if usuario.id == sesion.iniciador_id else sesion.iniciador_id
+    await gestor_conexiones.enviar_a(contraparte, {
+        "tipo": "video_finalizada", "sesion": _resumen_video_json(sesion),
+    })
+    return sesion
+
+
+@app.get("/api/video/sesiones/activa")
+def endpoint_video_activa(
+    sala_id: int = Query(..., ge=1),
+    usuario: UsuarioDB = Depends(obtener_usuario_actual),
+    db: Session = Depends(obtener_sesion),
+):
+    sala = ControladorChat(db).obtener_sala(sala_id)
+    if sala is None:
+        raise HTTPException(status_code=404, detail="Sala no encontrada.")
+    if usuario.id not in (sala.estudiante_id, sala.tutor_id):
+        raise HTTPException(status_code=403, detail="No participas en esta sala.")
+    sesion = ControladorVideollamada(db).activa_en_sala(sala_id)
+    if sesion is None:
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+    return _resumen_video_json(sesion)
+
+
+@app.get("/api/video/config", response_model=VideoConfigRespuesta)
+def endpoint_video_config():
+    """
+    Devuelve los `iceServers` que el cliente debe pasar a su `RTCPeerConnection`.
+    STUN público de Google por defecto; TURN opcional configurable vía env.
+    """
+    stun_csv = (os.getenv("BRIDGETS_STUN_URLS") or "stun:stun.l.google.com:19302").strip()
+    stun_urls = [u.strip() for u in stun_csv.split(",") if u.strip()]
+    ice_servers: list[dict] = []
+    if stun_urls:
+        ice_servers.append({"urls": stun_urls})
+    turn_url = (os.getenv("BRIDGETS_TURN_URL") or "").strip()
+    turn_user = (os.getenv("BRIDGETS_TURN_USER") or "").strip()
+    turn_cred = (os.getenv("BRIDGETS_TURN_CRED") or "").strip()
+    if turn_url and turn_user and turn_cred:
+        ice_servers.append({
+            "urls": [turn_url],
+            "username": turn_user,
+            "credential": turn_cred,
+        })
+    return VideoConfigRespuesta(ice_servers=ice_servers)
+
+
+# ----------------------------------------------------------------------
 # WebSocket
 # ----------------------------------------------------------------------
 
@@ -1485,6 +1665,81 @@ async def websocket_chat(websocket: WebSocket, token: str = Query(...)):
                 finally:
                     db_local.close()
                 continue
+
+            # ---------- Señalización WebRTC + estado de videollamada ----------
+            # Reglas comunes a todas las ramas siguientes:
+            #   - Cargamos la SesionVideoDB en una Session local (igual que el chat).
+            #   - Validamos que el usuario participa y que el estado permite
+            #     señalización (`aceptada` o `activa`, salvo `video_colgar`).
+            #   - El backend NO interpreta SDP/ICE: solo los reenvía a la
+            #     contraparte añadiendo `tipo` y `sesion_id`.
+            if tipo in ("webrtc_offer", "webrtc_answer", "webrtc_ice", "video_estado", "video_colgar"):
+                sesion_id = int(data.get("sesion_id", 0) or 0)
+                if not sesion_id:
+                    await websocket.send_json({"tipo": "error", "mensaje": "sesion_id requerido."})
+                    continue
+                db_local = SessionLocal()
+                try:
+                    ctrl = ControladorVideollamada(db_local)
+                    sesion = ctrl.obtener(sesion_id)
+                    if sesion is None or not ctrl.participa(sesion, usuario):
+                        await websocket.send_json({"tipo": "error", "mensaje": "Sesión inaccesible."})
+                        continue
+                    contraparte = ctrl.contraparte_id(sesion, usuario)
+
+                    if tipo == "video_colgar":
+                        # finalizar es idempotente; auditamos y notificamos solo
+                        # si esta llamada realmente transicionó el estado.
+                        estado_previo = sesion.estado
+                        ctrl.finalizar(sesion, usuario, motivo="colgada")
+                        if estado_previo != sesion.estado:
+                            duracion = _duracion_segundos(sesion)
+                            detalles = f"motivo={sesion.motivo_fin}, via=ws"
+                            if duracion is not None:
+                                detalles += f", duracion_s={duracion}"
+                            auditar(
+                                db_local, "video_finalizada", actor_id=usuario.id,
+                                recurso_tipo="sesion_video", recurso_id=sesion.id,
+                                detalles=detalles,
+                            )
+                            metricas.registrar_video(
+                                "finalizada", motivo=sesion.motivo_fin, duracion_seg=duracion,
+                            )
+                            payload_fin = {
+                                "tipo": "video_finalizada",
+                                "sesion": _resumen_video_json(sesion),
+                            }
+                            # Notificamos a la contraparte para que su UI cierre la
+                            # llamada. Al remitente no le hace falta el broadcast:
+                            # ya disparó él el colgar y puede cerrar su UI al
+                            # enviar el mensaje. Esto también evita un await
+                            # `ws.send_json(self)` dentro del propio handler.
+                            await gestor_conexiones.enviar_a(
+                                ctrl.contraparte_id(sesion, usuario), payload_fin,
+                            )
+                        continue
+
+                    if sesion.estado not in ESTADOS_SENALIZABLES:
+                        await websocket.send_json({
+                            "tipo": "error",
+                            "mensaje": f"Sesión en estado '{sesion.estado}' no acepta señalización.",
+                        })
+                        continue
+
+                    # El primer offer marca la sesión como `activa`.
+                    if tipo == "webrtc_offer" and sesion.estado == "aceptada":
+                        ctrl.marcar_activa(sesion)
+
+                    payload = {"tipo": tipo, "sesion_id": sesion.id}
+                    # Reenviamos los campos del cliente verbatim, sin interpretarlos.
+                    for clave in ("sdp", "type", "candidate", "sdpMid", "sdpMLineIndex", "cam", "mic", "pantalla"):
+                        if clave in data:
+                            payload[clave] = data[clave]
+                    await gestor_conexiones.enviar_a(contraparte, payload)
+                finally:
+                    db_local.close()
+                continue
+
             await websocket.send_json({"tipo": "error", "mensaje": f"Tipo desconocido: {tipo}"})
     except WebSocketDisconnect:
         pass

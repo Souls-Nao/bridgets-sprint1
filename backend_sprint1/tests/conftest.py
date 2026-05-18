@@ -57,7 +57,11 @@ def client():
     for lim in (limitador_disponibilidad, limitador_login, limitador_registro):
         with lim._lock:
             lim._historial.clear()
-    yield TestClient(app_server.app)
+    # Usar TestClient como context manager garantiza que el portal de starlette
+    # se levante y se cierre limpiamente entre tests — clave para evitar que
+    # estado de WebSockets se filtre entre suites.
+    with TestClient(app_server.app) as cliente:
+        yield cliente
 
 
 @pytest.fixture
@@ -112,7 +116,11 @@ def auth_estudiante(estudiante):
 
 @pytest.fixture(autouse=True)
 def _limpiar_db_entre_tests():
-    """Garantiza aislamiento: tras cada test borramos las tablas y las recreamos."""
+    """Garantiza aislamiento: tras cada test borramos las tablas y las recreamos.
+    También limpiamos el registro de conexiones WS, que es un singleton de
+    proceso y de lo contrario arrastraría entradas obsoletas entre tests."""
     yield
     Base.metadata.drop_all(bind=motor_db.engine)
     Base.metadata.create_all(bind=motor_db.engine)
+    from servicio_ws import gestor_conexiones
+    gestor_conexiones._conexiones.clear()
