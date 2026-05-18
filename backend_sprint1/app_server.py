@@ -22,7 +22,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from entidades import UsuarioDB
+from entidades import AnuncioClaseDB, SuscripcionAnuncioDB, UsuarioDB
 from migraciones import aplicar_migraciones_idempotentes
 from motor_db import Base, SessionLocal, engine, obtener_sesion
 from servicio_anuncios import ControladorAnuncios
@@ -815,14 +815,106 @@ def endpoint_listar_comentarios(
     response_model=ComentarioResumen,
     status_code=status.HTTP_201_CREATED,
 )
-def endpoint_crear_comentario(
+async def endpoint_crear_comentario(
     datos: ComentarioCrear,
     anuncio_id: int = Path(..., ge=1),
     usuario: UsuarioDB = Depends(obtener_usuario_actual),
     db: Session = Depends(obtener_sesion),
 ):
-    _cargar_anuncio_y_acceso(db, anuncio_id, usuario)
-    return ControladorComentarios(db).crear(anuncio_id, usuario, datos)
+    anuncio = _cargar_anuncio_y_acceso(db, anuncio_id, usuario)
+    creado = ControladorComentarios(db).crear(anuncio_id, usuario, datos)
+
+    # Notificar a quienes se hayan suscrito al anuncio (excepto al autor del
+    # comentario, que ya sabe que lo escribió). El autor del anuncio queda
+    # incluido si se ha suscrito explícitamente — no se autoasume.
+    suscritos = (
+        db.query(SuscripcionAnuncioDB.usuario_id)
+        .filter(
+            SuscripcionAnuncioDB.anuncio_id == anuncio_id,
+            SuscripcionAnuncioDB.usuario_id != usuario.id,
+        )
+        .all()
+    )
+    destinatarios = [s.usuario_id for s in suscritos]
+    if destinatarios:
+        clase = ControladorClases(db).obtener_clase(anuncio.clase_id)
+        clase_nombre = clase.nombre if clase else "una clase"
+        await _notificar(
+            db, destinatarios,
+            tipo="comentario_nuevo",
+            titulo=f"💬 Nuevo comentario en «{anuncio.titulo}»",
+            cuerpo=f"{usuario.nombre_completo} en {clase_nombre}: {datos.contenido[:140]}",
+            enlace_tipo="anuncio",
+            enlace_id=anuncio_id,
+        )
+    return creado
+
+
+# -------------------- Suscripciones a anuncios --------------------
+# Modelo: opt-in. Solo los usuarios que explícitamente se suscriben reciben
+# notificación de nuevos comentarios en ese anuncio. Tutor y estudiantes
+# usan el mismo flujo.
+
+def _cargar_anuncio_para_suscripcion(db: Session, anuncio_id: int, usuario: UsuarioDB) -> AnuncioClaseDB:
+    """Comparte la validación con `_cargar_anuncio_y_acceso`: el caller debe
+    tener acceso a la clase del anuncio para poder gestionar su suscripción.
+    Nombre distinto del `_cargar_anuncio_o_404` ya existente (que devuelve
+    una tupla y aplica reglas de tutor) para no colisionar."""
+    return _cargar_anuncio_y_acceso(db, anuncio_id, usuario)
+
+
+@app.get("/api/anuncios/{anuncio_id}/suscripcion")
+def endpoint_estado_suscripcion_anuncio(
+    anuncio_id: int = Path(..., ge=1),
+    usuario: UsuarioDB = Depends(obtener_usuario_actual),
+    db: Session = Depends(obtener_sesion),
+):
+    _cargar_anuncio_para_suscripcion(db, anuncio_id, usuario)
+    existe = (
+        db.query(SuscripcionAnuncioDB.id)
+        .filter(
+            SuscripcionAnuncioDB.usuario_id == usuario.id,
+            SuscripcionAnuncioDB.anuncio_id == anuncio_id,
+        )
+        .first()
+    )
+    return {"suscrito": existe is not None}
+
+
+@app.post("/api/anuncios/{anuncio_id}/suscripcion", status_code=status.HTTP_204_NO_CONTENT)
+def endpoint_suscribir_anuncio(
+    anuncio_id: int = Path(..., ge=1),
+    usuario: UsuarioDB = Depends(obtener_usuario_actual),
+    db: Session = Depends(obtener_sesion),
+):
+    _cargar_anuncio_para_suscripcion(db, anuncio_id, usuario)
+    existente = (
+        db.query(SuscripcionAnuncioDB)
+        .filter(
+            SuscripcionAnuncioDB.usuario_id == usuario.id,
+            SuscripcionAnuncioDB.anuncio_id == anuncio_id,
+        )
+        .first()
+    )
+    if existente is None:
+        db.add(SuscripcionAnuncioDB(usuario_id=usuario.id, anuncio_id=anuncio_id))
+        db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.delete("/api/anuncios/{anuncio_id}/suscripcion", status_code=status.HTTP_204_NO_CONTENT)
+def endpoint_desuscribir_anuncio(
+    anuncio_id: int = Path(..., ge=1),
+    usuario: UsuarioDB = Depends(obtener_usuario_actual),
+    db: Session = Depends(obtener_sesion),
+):
+    _cargar_anuncio_para_suscripcion(db, anuncio_id, usuario)
+    db.query(SuscripcionAnuncioDB).filter(
+        SuscripcionAnuncioDB.usuario_id == usuario.id,
+        SuscripcionAnuncioDB.anuncio_id == anuncio_id,
+    ).delete(synchronize_session=False)
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @app.delete("/api/comentarios/{comentario_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -1494,6 +1586,17 @@ async def endpoint_iniciar_video(
         "tipo": "video_solicitud",
         "sesion": _resumen_video_json(sesion),
     })
+    # Persistimos también en el centro in-app: si el receptor está offline al
+    # llegar la solicitud, sigue viendo "te llamaron" al volver. El enlace
+    # apunta a la propia sesión para que el click pueda intentar aceptar.
+    await _notificar(
+        db, [sesion.receptor_id],
+        tipo="video_solicitud",
+        titulo=f"📹 {usuario.nombre_completo} te está llamando",
+        cuerpo=f"Videollamada en {sala.clase.nombre if sala.clase else 'la clase'}.",
+        enlace_tipo="video_sesion",
+        enlace_id=sesion.id,
+    )
     return sesion
 
 

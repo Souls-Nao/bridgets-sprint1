@@ -319,3 +319,35 @@ class SesionVideoDB(Base):
     motivo_fin = Column(String(40), nullable=True)
 
     sala = relationship("SalaChatDB")
+
+
+class SuscripcionAnuncioDB(Base):
+    """
+    Opt-in del usuario para recibir notificaciones cuando alguien comente un
+    anuncio concreto. Por defecto, los anuncios NO disparan notificaciones de
+    comentarios para no llenar el centro de avisos con conversación ajena: el
+    usuario suscribe explícitamente los anuncios que le interesa seguir
+    (típicamente, los suyos o aquellos donde participa).
+
+    Constraint única por (usuario, anuncio): un mismo usuario no puede estar
+    suscrito dos veces al mismo anuncio.
+    """
+    __tablename__ = "suscripciones_anuncio"
+    __table_args__ = (
+        UniqueConstraint("usuario_id", "anuncio_id", name="uq_suscripcion_anuncio_usuario"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    usuario_id = Column(
+        Integer,
+        ForeignKey("cuentas_v2.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    anuncio_id = Column(
+        Integer,
+        ForeignKey("anuncios_clase.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    creada_en = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
